@@ -1,0 +1,288 @@
+from keras.datasets import mnist
+import numpy as np
+import tensorflow as tf
+from keras.preprocessing.image import ImageDataGenerator
+from keras.optimizers import SGD
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from imutils import build_montages
+import matplotlib.pyplot as plt
+import argparse
+import cv2
+import os
+from collections import OrderedDict
+from sklearn.preprocessing import LabelBinarizer
+
+
+folders = []
+
+path = 'Data/EnglishImg/English/Img/GoodImg/Bmp'
+
+for root, dirnames, filenames in os.walk(path):
+    for j in dirnames:
+        folders.append(j)
+
+files = {}
+
+dict1 = OrderedDict(sorted(files.items()))
+
+data = []
+labels=[]
+tmp=0
+
+img = cv2.imread('Data/EnglishImg/English/Img/GoodImg/Bmp/Sample041/img041-00190.png')
+
+
+def conTO28x28(path):
+    
+    img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2GRAY)   
+
+    # convert each image of shape (32, 28, 1)
+    w, h = img.shape
+    if h > 28 or w > 28:
+        
+        (tH, tW) = img.shape
+        dX = int(max(0, 28 - tW) / 2.0)
+        dY = int(max(0, 28 - tH) / 2.0)
+
+        img = cv2.copyMakeBorder(img, top=dY, bottom=dY,
+              left=dX, right=dX, borderType=cv2.BORDER_CONSTANT,
+              value=(0, 0, 0))
+        img = cv2.resize(img, (28, 28))
+
+    w, h = img.shape
+
+    if w < 28:
+        add_zeros = np.ones((28-w, h))*255
+        img = np.concatenate((img, add_zeros))
+
+    if h < 28:
+        add_zeros = np.ones((28, 28-h))*255
+        img = np.concatenate((img, add_zeros), axis=1)
+    return img
+
+for i in dict1.keys():
+    for j in dict1[i]:
+        labels.append(tmp)
+        image = conTO28x28("Data/EnglishImg/English/Img/GoodImg/Bmp/"+i+"/"+j)
+        data.append(image)
+    tmp+=1
+
+from numpy import save
+
+labels = np.array(labels, dtype="int")
+data = np.array(data, dtype='float32')
+
+save('data.npy', data)
+save('labels.npy', labels)
+
+tmp_data = np.load('data.npy')
+
+def load_az_dataset(datasetPath):
+    data = []
+    labels = []
+    for row in open(datasetPath):
+        row = row.split(",")
+        label = int(row[0])
+        image = np.array([int(x) for x in row[1:]], dtype="uint8")
+        image = image.reshape((28,28))
+        data.append(image)
+        labels.append(label)
+    data = np.array(data, dtype="float32")
+    labels = np.array(labels, dtype="int")
+    return (data, labels)
+
+((trainData, trainLabels), (testData, testLabels)) = mnist.load_data()
+(azData, azLabels) = load_az_dataset("Data/A_Z Handwritten Data.csv")
+
+mnist_data = np.vstack([trainData, testData])
+mnist_labels = np.hstack([trainLabels, testLabels])
+
+labels1=np.hstack([mnist_labels, labels, azLabels])
+data1=np.vstack([mnist_data, data, azData])
+
+save("Data/combined_data.npy", data1)
+save("Data/combined_labels.npy", labels1)
+
+loaded_data = np.load('Data/combined_data.npy')
+loaded_labels = np.load('Data/combined_labels.npy')
+
+
+data = [cv2.resize(image, (32,32)) for image in loaded_data]
+data = np.array(data, dtype='float32')
+
+data2 = np.expand_dims(data, axis=-1)
+
+le = LabelBinarizer()
+labels = le.fit_transform(loaded_labels)
+counts = labels.sum(axis=0)
+
+
+classTotals = labels.sum(axis=0)
+classWeight = {}
+
+for i in range(0, len(classTotals)):
+    classWeight[i] = classTotals.max() / classTotals[i]
+
+(trainX, testX, trainY, testY) = train_test_split(data2,
+	labels, test_size=0.25, stratify=labels, random_state=42)
+
+aug = ImageDataGenerator(
+    rotation_range = 10,
+    zoom_range=0.05,
+    width_shift_range=0.1,
+    shear_range=0.15,
+    height_shift_range=0.1,
+    fill_mode="nearest"
+)
+
+from keras.layers import BatchNormalization
+from keras.layers.convolutional import Conv2D, AveragePooling2D, MaxPooling2D, ZeroPadding2D
+from keras.layers.core import  Flatten
+from keras.layers.core import Activation, Dense
+from keras.layers import Flatten, Input
+from keras.models import Model
+from keras.layers import add
+from keras.regularizers import l2
+from keras import backend as K
+
+
+class ResNet:
+	@staticmethod
+	def residual_module(data, K, stride, chanDim, red=False,
+		reg=0.0001, bnEps=2e-5, bnMom=0.9):
+		# the shortcut branch of the ResNet module should be
+		# initialize as the input (identity) data
+		shortcut = data
+
+		# the first block of the ResNet module are the 1x1 CONVs
+		bn1 = BatchNormalization(axis=chanDim, epsilon=bnEps,
+			momentum=bnMom)(data)
+		act1 = Activation("relu")(bn1)
+		conv1 = Conv2D(int(K * 0.25), (1, 1), use_bias=False,
+			kernel_regularizer=l2(reg))(act1)
+
+		# the second block of the ResNet module are the 3x3 CONVs
+		bn2 = BatchNormalization(axis=chanDim, epsilon=bnEps,
+			momentum=bnMom)(conv1)
+		act2 = Activation("relu")(bn2)
+		conv2 = Conv2D(int(K * 0.25), (3, 3), strides=stride,
+			padding="same", use_bias=False,
+			kernel_regularizer=l2(reg))(act2)
+
+		# the third block of the ResNet module is another set of 1x1
+		# CONVs
+		bn3 = BatchNormalization(axis=chanDim, epsilon=bnEps,
+			momentum=bnMom)(conv2)
+		act3 = Activation("relu")(bn3)
+		conv3 = Conv2D(K, (1, 1), use_bias=False,
+			kernel_regularizer=l2(reg))(act3)
+
+		# if we are to reduce the spatial size, apply a CONV layer to
+		# the shortcut
+		if red:
+			shortcut = Conv2D(K, (1, 1), strides=stride,
+				use_bias=False, kernel_regularizer=l2(reg))(act1)
+
+		# add together the shortcut and the final CONV
+		x = add([conv3, shortcut])
+
+		# return the addition as the output of the ResNet module
+		return x
+
+	@staticmethod
+	def build(width, height, depth, classes, stages, filters,
+		reg=0.0001, bnEps=2e-5, bnMom=0.9, dataset="cifar"):
+		# initialize the input shape to be "channels last" and the
+		# channels dimension itself
+		inputShape = (height, width, depth)
+		chanDim = -1
+
+		# if we are using "channels first", update the input shape
+		# and channels dimension
+		if K.image_data_format() == "channels_first":
+			inputShape = (depth, height, width)
+			chanDim = 1
+
+		# set the input and apply BN
+		inputs = Input(shape=inputShape)
+		x = BatchNormalization(axis=chanDim, epsilon=bnEps,
+			momentum=bnMom)(inputs)
+
+		# check if we are utilizing the CIFAR dataset
+		if dataset == "cifar":
+			# apply a single CONV layer
+			x = Conv2D(filters[0], (3, 3), use_bias=False,
+				padding="same", kernel_regularizer=l2(reg))(x)
+
+		# check to see if we are using the Tiny ImageNet dataset
+		elif dataset == "tiny_imagenet":
+			# apply CONV => BN => ACT => POOL to reduce spatial size
+			x = Conv2D(filters[0], (5, 5), use_bias=False,
+				padding="same", kernel_regularizer=l2(reg))(x)
+			x = BatchNormalization(axis=chanDim, epsilon=bnEps,
+				momentum=bnMom)(x)
+			x = Activation("relu")(x)
+			x = ZeroPadding2D((1, 1))(x)
+			x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+
+		# loop over the number of stages
+		for i in range(0, len(stages)):
+			# initialize the stride, then apply a residual module
+			# used to reduce the spatial size of the input volume
+			stride = (1, 1) if i == 0 else (2, 2)
+			x = ResNet.residual_module(x, filters[i + 1], stride,
+				chanDim, red=True, bnEps=bnEps, bnMom=bnMom)
+
+			# loop over the number of layers in the stage
+			for j in range(0, stages[i] - 1):
+				# apply a ResNet module
+				x = ResNet.residual_module(x, filters[i + 1],
+					(1, 1), chanDim, bnEps=bnEps, bnMom=bnMom)
+
+		# apply BN => ACT => POOL
+		x = BatchNormalization(axis=chanDim, epsilon=bnEps,
+			momentum=bnMom)(x)
+		x = Activation("relu")(x)
+		x = AveragePooling2D((8, 8))(x)
+
+		# softmax classifier
+		x = Flatten()(x)
+		x = Dense(classes, kernel_regularizer=l2(reg))(x)
+		x = Activation("softmax")(x)
+
+		# create the model
+		model = Model(inputs, x, name="resnet")
+
+		# return the constructed network architecture
+		return model
+     
+EPOCHS = 200 # TRAINING THE MODEL FOR 200 EPOCHS
+INIT_LR = 1e-1  #LEARNING RATE SET AS 0.01
+BS = 256 # BATCH SIZE
+
+print("[INFO] compiling model...")
+opt = SGD(learning_rate=INIT_LR, decay=INIT_LR/EPOCHS) # Using SGD(Schotastic Gradient Descent) as optimizer
+
+model = ResNet.build(32, 32, 1, len(le.classes_), (3,3,3), (64, 64, 128, 256), reg=0.0005)
+
+model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=["accuracy"])
+
+checkpoint_path = "../models"
+checkpoint_dir = os.path.dirname(checkpoint_path)
+
+# Create a callback that saves the model's weights
+cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+                                                 save_weights_only=True,
+                                                 verbose=1)
+
+H = model.fit(
+    aug.flow(trainX, trainY, batch_size=BS),
+    validation_data = (testX, testY),
+    steps_per_epoch=len(trainX) // BS,
+    epochs = EPOCHS,
+    class_weight = classWeight,
+    verbose=1, 
+    callbacks=[cp_callback]
+)
+model.save("models/RESNET_OCR", save_format='.h5')
